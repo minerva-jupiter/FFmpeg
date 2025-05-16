@@ -97,7 +97,7 @@ typedef struct AVTextFormatter {
     const char *name;
 
     int  (*init)  (AVTextFormatContext *tctx);
-    void (*uninit)(AVTextFormatContext *tctx);
+    int  (*uninit)(AVTextFormatContext *tctx);
 
     void (*print_section_header)(AVTextFormatContext *tctx, const void *data);
     void (*print_section_footer)(AVTextFormatContext *tctx);
@@ -158,7 +158,7 @@ typedef struct AVTextFormatOptions {
 int avtext_context_open(AVTextFormatContext **ptctx, const AVTextFormatter *formatter, AVTextWriterContext *writer_context, const char *args,
                         const AVTextFormatSection *sections, int nb_sections, AVTextFormatOptions options, char *show_data_hash);
 
-void avtext_context_close(AVTextFormatContext **tctx);
+int avtext_context_close(AVTextFormatContext **tctx);
 
 
 void avtext_print_section_header(AVTextFormatContext *tctx, const void *data, int section_id);
