@@ -95,8 +95,6 @@ typedef struct VulkanDeviceFeatures {
     VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptor_buffer;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float;
 
-    VkPhysicalDeviceOpticalFlowFeaturesNV optical_flow;
-
 #ifdef VK_KHR_shader_relaxed_extended_instruction
     VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR relaxed_extended_instruction;
 #endif
@@ -144,6 +142,9 @@ typedef struct VulkanDevicePriv {
 
     /* Disable multiplane images */
     int disable_multiplane;
+
+    /* Maximum queues */
+    int limit_queues;
 
     /* Nvidia */
     int dev_is_nvidia;
@@ -234,9 +235,6 @@ static void device_features_init(AVHWDeviceContext *ctx, VulkanDeviceFeatures *f
     FF_VK_STRUCT_EXT(s, &feats->device, &feats->relaxed_extended_instruction, FF_VK_EXT_RELAXED_EXTENDED_INSTR,
                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR);
 #endif
-
-    FF_VK_STRUCT_EXT(s, &feats->device, &feats->optical_flow, FF_VK_EXT_OPTICAL_FLOW,
-                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV);
 }
 
 /* Copy all needed device features */
@@ -311,7 +309,6 @@ static void device_features_copy_needed(VulkanDeviceFeatures *dst, VulkanDeviceF
     COPY_VAL(expect_assume.shaderExpectAssume);
 #endif
 
-    COPY_VAL(optical_flow.opticalFlow);
 #undef COPY_VAL
 }
 
@@ -607,7 +604,6 @@ static const VulkanOptExtension optional_device_exts[] = {
     { VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME,              FF_VK_EXT_DEVICE_DRM             },
     { VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,              FF_VK_EXT_ATOMIC_FLOAT           },
     { VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,               FF_VK_EXT_COOP_MATRIX            },
-    { VK_NV_OPTICAL_FLOW_EXTENSION_NAME,                      FF_VK_EXT_OPTICAL_FLOW           },
     { VK_EXT_SHADER_OBJECT_EXTENSION_NAME,                    FF_VK_EXT_SHADER_OBJECT          },
     { VK_KHR_SHADER_SUBGROUP_ROTATE_EXTENSION_NAME,           FF_VK_EXT_SUBGROUP_ROTATE        },
 #ifdef VK_KHR_shader_expect_assume
@@ -1425,6 +1421,13 @@ static int setup_queue_families(AVHWDeviceContext *ctx, VkDeviceCreateInfo *cd)
     VulkanDevicePriv *p = ctx->hwctx;
     AVVulkanDeviceContext *hwctx = &p->p;
     FFVulkanFunctions *vk = &p->vkctx.vkfn;
+    VkPhysicalDeviceDriverProperties dprops = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 props2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &dprops,
+    };
 
     VkQueueFamilyProperties2 *qf = NULL;
     VkQueueFamilyVideoPropertiesKHR *qf_vid = NULL;
@@ -1478,7 +1481,14 @@ static int setup_queue_families(AVHWDeviceContext *ctx, VkDeviceCreateInfo *cd)
 
     hwctx->nb_qf = 0;
 
-    /* Pick each queue family to use */
+    /* NVIDIA's proprietary drivers have stupid limits, where each queue
+     * you allocate takes tens of milliseconds, and the more queues you
+     * allocate, the less you'll have left before initializing a device
+     * simply fails (112 seems to be the max). GLOBALLY.
+     * Detect this, and minimize using queues as much as possible. */
+    vk->GetPhysicalDeviceProperties2(hwctx->phys_dev, &props2);
+
+    /* Pick each queue family to use. */
 #define PICK_QF(type, vid_op)                                            \
     do {                                                                 \
         uint32_t i;                                                      \
@@ -1502,6 +1512,15 @@ static int setup_queue_families(AVHWDeviceContext *ctx, VkDeviceCreateInfo *cd)
         if (i == hwctx->nb_qf) {                                         \
             hwctx->qf[i].idx = idx;                                      \
             hwctx->qf[i].num = qf[idx].queueFamilyProperties.queueCount; \
+            if (p->limit_queues ||                                       \
+                dprops.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) {    \
+                int max = p->limit_queues;                               \
+                if (type == VK_QUEUE_GRAPHICS_BIT)                       \
+                    hwctx->qf[i].num = FFMIN(hwctx->qf[i].num,           \
+                                             max ? max : 1);             \
+                else if (max)                                            \
+                    hwctx->qf[i].num = FFMIN(hwctx->qf[i].num, max);     \
+            }                                                            \
             hwctx->qf[i].flags = type;                                   \
             hwctx->qf[i].video_caps = vid_op;                            \
             hwctx->nb_qf++;                                              \
@@ -1511,7 +1530,6 @@ static int setup_queue_families(AVHWDeviceContext *ctx, VkDeviceCreateInfo *cd)
     PICK_QF(VK_QUEUE_GRAPHICS_BIT, VK_VIDEO_CODEC_OPERATION_NONE_KHR);
     PICK_QF(VK_QUEUE_COMPUTE_BIT, VK_VIDEO_CODEC_OPERATION_NONE_KHR);
     PICK_QF(VK_QUEUE_TRANSFER_BIT, VK_VIDEO_CODEC_OPERATION_NONE_KHR);
-    PICK_QF(VK_QUEUE_OPTICAL_FLOW_BIT_NV, VK_VIDEO_CODEC_OPERATION_NONE_KHR);
 
     PICK_QF(VK_QUEUE_VIDEO_ENCODE_BIT_KHR, VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR);
     PICK_QF(VK_QUEUE_VIDEO_DECODE_BIT_KHR, VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR);
@@ -1707,6 +1725,11 @@ static int vulkan_device_create_internal(AVHWDeviceContext *ctx,
     opt_d = av_dict_get(opts, "linear_images", NULL, 0);
     if (opt_d)
         p->use_linear_images = strtol(opt_d->value, NULL, 10);
+
+    /* Limit queues to a given number if needed */
+    opt_d = av_dict_get(opts, "limit_queues", NULL, 0);
+    if (opt_d)
+        p->limit_queues = strtol(opt_d->value, NULL, 10);
 
     /* The disable_multiplane argument takes precedent over the option */
     p->disable_multiplane = disable_multiplane;
