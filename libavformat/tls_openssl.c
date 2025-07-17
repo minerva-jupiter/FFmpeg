@@ -533,7 +533,7 @@ int ff_dtls_export_materials(URLContext *h, char *dtls_srtp_materials, size_t ma
     ret = SSL_export_keying_material(c->ssl, dtls_srtp_materials, materials_sz,
         dst, strlen(dst), NULL, 0, 0);
     if (!ret) {
-        av_log(c, AV_LOG_ERROR, "TLS: Failed to export SRTP material, %s\n", openssl_get_error(c));
+        av_log(c, AV_LOG_ERROR, "Failed to export SRTP material, %s\n", openssl_get_error(c));
         return -1;
     }
     return 0;
@@ -702,8 +702,7 @@ static int dtls_handshake(URLContext *h)
     int ret = 1, r0, r1;
     TLSContext *p = h->priv_data;
 
-    int was_nonblock = h->flags & AVIO_FLAG_NONBLOCK;
-    h->flags &= ~AVIO_FLAG_NONBLOCK;
+    p->tls_shared.udp->flags &= ~AVIO_FLAG_NONBLOCK;
 
     r0 = SSL_do_handshake(p->ssl);
     if (r0 <= 0) {
@@ -718,14 +717,13 @@ static int dtls_handshake(URLContext *h)
         av_log(p, AV_LOG_TRACE, "Handshake success, r0=%d\n", r0);
     }
 
-    if (SSL_is_init_finished(p->ssl) != 1)
+    /* Check whether the handshake is completed. */
+    if (SSL_is_init_finished(p->ssl) != TLS_ST_OK)
         goto end;
 
     ret = 0;
     p->tls_shared.state = DTLS_STATE_FINISHED;
 end:
-    if (was_nonblock)
-        h->flags |= AVIO_FLAG_NONBLOCK;
     return ret;
 }
 
@@ -770,7 +768,7 @@ static av_cold int openssl_init_ca_key_cert(URLContext *h)
     } else if (c->key_buf) {
         pkey = pkey_from_pem_string(c->key_buf, 1);
         if (SSL_CTX_use_PrivateKey(p->ctx, pkey) != 1) {
-            av_log(p, AV_LOG_ERROR, "TLS: Init SSL_CTX_use_PrivateKey failed, %s\n", openssl_get_error(p));
+            av_log(p, AV_LOG_ERROR, "Init SSL_CTX_use_PrivateKey failed, %s\n", openssl_get_error(p));
             ret = AVERROR(EINVAL);
             goto fail;
         }
@@ -837,12 +835,9 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
     if (c->verify)
         SSL_CTX_set_verify(p->ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
 
-    if (!c->listen && !c->numerichost)
-        SSL_set_tlsext_host_name(p->ssl, c->host);
-
     /* Setup the SRTP context */
     if (SSL_CTX_set_tlsext_use_srtp(p->ctx, profiles)) {
-        av_log(p, AV_LOG_ERROR, "TLS: Init SSL_CTX_set_tlsext_use_srtp failed, profiles=%s, %s\n",
+        av_log(p, AV_LOG_ERROR, "Init SSL_CTX_set_tlsext_use_srtp failed, profiles=%s, %s\n",
             profiles, openssl_get_error(p));
         ret = AVERROR(EINVAL);
         return ret;
@@ -854,6 +849,9 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
         ret = AVERROR(ENOMEM);
         goto fail;
     }
+
+    if (!c->listen && !c->numerichost)
+        SSL_set_tlsext_host_name(p->ssl, c->host);
 
     /* Setup the callback for logging. */
     SSL_set_ex_data(p->ssl, 0, p);
@@ -898,12 +896,12 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
         ret = dtls_handshake(h);
         // Fatal SSL error, for example, no available suite when peer is DTLS 1.0 while we are DTLS 1.2.
         if (ret < 0) {
-            av_log(p, AV_LOG_ERROR, "TLS: Failed to drive SSL context, ret=%d\n", ret);
+            av_log(p, AV_LOG_ERROR, "Failed to drive SSL context, ret=%d\n", ret);
             return AVERROR(EIO);
         }
     }
 
-    av_log(p, AV_LOG_VERBOSE, "TLS: Setup ok, MTU=%d\n", p->tls_shared.mtu);
+    av_log(p, AV_LOG_VERBOSE, "Setup ok, MTU=%d\n", p->tls_shared.mtu);
 
     ret = 0;
 fail:
