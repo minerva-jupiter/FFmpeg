@@ -25,15 +25,15 @@
 SECTION .text
 
 %macro detect_range_fn 1 ; suffix
-cglobal detect_range%1, 6, 7, 5, data, stride, width, height, mpeg_min, mpeg_max, x
+cglobal detect_range%1, 4, 7, 5, data, stride, width, height, mpeg_min, mpeg_max, x
 %if UNIX64 && notcpuflag(avx512)
     movd xm0, mpeg_mind
     movd xm1, mpeg_maxd
     vpbroadcast%1 m0, xm0
     vpbroadcast%1 m1, xm1
 %else
-    vpbroadcast%1 m0, mpeg_mind
-    vpbroadcast%1 m1, mpeg_maxd
+    vpbroadcast%1 m0, mpeg_minm
+    vpbroadcast%1 m1, mpeg_maxm
 %endif
     add dataq, widthq
     neg widthq
@@ -65,7 +65,7 @@ cglobal detect_range%1, 6, 7, 5, data, stride, width, height, mpeg_min, mpeg_max
     jg .lineloop
 .end:
     setnz al
-    movzx rax, al
+    movzx eax, al
     RET
 %endmacro
 
@@ -125,11 +125,11 @@ cglobal detect_alpha%1_%3, 6, 7, 6, color, color_stride, alpha, alpha_stride, wi
     add alphaq, alpha_strideq
     dec heightq
     jg .lineloop
-    xor rax, rax
+    xor eax, eax
     RET
 
 .found:
-    mov rax, 1
+    mov eax, 1
     RET
 %endmacro
 
@@ -141,7 +141,7 @@ detect_alpha_fn w, d, full
 detect_alpha_fn b, w, limited
 detect_alpha_fn w, d, limited
 
-INIT_ZMM avx512
+INIT_ZMM avx512icl
 detect_range_fn b
 detect_range_fn w
 detect_alpha_fn b, w, full
