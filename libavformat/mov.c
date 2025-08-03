@@ -3028,6 +3028,27 @@ static int mov_skip_multiple_stsd(MOVContext *c, AVIOContext *pb,
     return 0;
 }
 
+static int mov_finalize_stsd_entry(MOVContext *c, AVStream *st)
+{
+    int ret;
+
+    /* special codec parameters handling */
+    switch (st->codecpar->codec_id) {
+    case AV_CODEC_ID_H264:
+        // done for ai5q, ai52, ai55, ai1q, ai12 and ai15.
+        if (!st->codecpar->extradata_size && TAG_IS_AVCI(st->codecpar->codec_tag)) {
+            ret = ff_generate_avci_extradata(st);
+            if (ret < 0)
+               return ret;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return 0;
+}
+
 int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
 {
     AVStream *st;
@@ -3104,6 +3125,10 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
                 return ret;
         } else if (a.size > 0)
             avio_skip(pb, a.size);
+
+        ret = mov_finalize_stsd_entry(c, st);
+        if (ret < 0)
+            return ret;
 
         if (sc->extradata && st->codecpar->extradata) {
             int extra_size = st->codecpar->extradata_size;
@@ -5216,14 +5241,6 @@ static int mov_read_trak(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 #endif
     }
 
-    // done for ai5q, ai52, ai55, ai1q, ai12 and ai15.
-    if (!st->codecpar->extradata_size && st->codecpar->codec_id == AV_CODEC_ID_H264 &&
-        TAG_IS_AVCI(st->codecpar->codec_tag)) {
-        ret = ff_generate_avci_extradata(st);
-        if (ret < 0)
-            return ret;
-    }
-
     switch (st->codecpar->codec_id) {
     case AV_CODEC_ID_H261:
     case AV_CODEC_ID_H263:
@@ -5406,7 +5423,7 @@ static int heif_add_stream(MOVContext *c, HEIFItem *item)
         return AVERROR(ENOMEM);
     sc = av_mallocz(sizeof(MOVStreamContext));
     if (!sc)
-        return AVERROR(ENOMEM);
+        goto fail;
 
     item->st = st;
     st->id = item->item_id;
@@ -5427,30 +5444,36 @@ static int heif_add_stream(MOVContext *c, HEIFItem *item)
         av_dict_set(&st->metadata, "title", item->name, 0);
 
     // Populate the necessary fields used by mov_build_index.
-    sc->stsc_count = 1;
     sc->stsc_data = av_malloc_array(1, sizeof(*sc->stsc_data));
     if (!sc->stsc_data)
-        return AVERROR(ENOMEM);
+        goto fail;
+    sc->stsc_count = 1;
     sc->stsc_data[0].first = 1;
     sc->stsc_data[0].count = 1;
     sc->stsc_data[0].id = 1;
     sc->chunk_offsets = av_malloc_array(1, sizeof(*sc->chunk_offsets));
     if (!sc->chunk_offsets)
-        return AVERROR(ENOMEM);
+        goto fail;
     sc->chunk_count = 1;
     sc->sample_sizes = av_malloc_array(1, sizeof(*sc->sample_sizes));
     if (!sc->sample_sizes)
-        return AVERROR(ENOMEM);
+        goto fail;
     sc->sample_count = 1;
     sc->stts_data = av_malloc_array(1, sizeof(*sc->stts_data));
     if (!sc->stts_data)
-        return AVERROR(ENOMEM);
+        goto fail;
     sc->stts_count = 1;
     sc->stts_data[0].count = 1;
     // Not used for still images. But needed by mov_build_index.
     sc->stts_data[0].duration = 0;
 
     return 0;
+fail:
+    mov_free_stream_context(c->fc, st);
+    ff_remove_stream(c->fc, st);
+    item->st = NULL;
+
+    return AVERROR(ENOMEM);
 }
 
 static int mov_read_meta(MOVContext *c, AVIOContext *pb, MOVAtom atom)
@@ -8928,11 +8951,13 @@ static int mov_read_infe(MOVContext *c, AVIOContext *pb, MOVAtom atom)
             continue;
         break;
     }
-    if (!item)
+    if (!item) {
+        av_bprint_finalize(&item_name, NULL);
         return AVERROR(ENOMEM);
+    }
 
-    if (ret)
-        av_bprint_finalize(&item_name, &item->name);
+    av_assert1(ret);
+    av_bprint_finalize(&item_name, &item->name);
     item->item_id = item_id;
     item->type    = item_type;
 
@@ -8999,12 +9024,6 @@ fail:
             continue;
 
         av_freep(&item->name);
-        if (!item->st)
-            continue;
-
-        mov_free_stream_context(c->fc, item->st);
-        ff_remove_stream(c->fc, item->st);
-        item->st = NULL;
     }
     return ret;
 }
