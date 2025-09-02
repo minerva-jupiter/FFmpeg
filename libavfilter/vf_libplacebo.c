@@ -170,8 +170,7 @@ typedef struct LibplaceboContext {
     /* input state */
     LibplaceboInput *inputs;
     int nb_inputs;
-    int64_t status_pts; ///< tracks status of most recently used input
-    int status;
+    int nb_active;
 
     /* settings */
     char *out_format_string;
@@ -768,6 +767,7 @@ static int init_vulkan(AVFilterContext *avctx, const AVVulkanDeviceContext *hwct
         return AVERROR(ENOMEM);
     for (int i = 0; i < s->nb_inputs; i++)
         RET(input_init(avctx, &s->inputs[i], i));
+    s->nb_active = s->nb_inputs;
     s->linear_rr = pl_renderer_create(s->log, s->gpu);
 
     /* fall through */
@@ -950,22 +950,18 @@ static int output_frame(AVFilterContext *ctx, int64_t pts)
         nb_visible++;
     }
 
-    /* It should be impossible to call output_frame() without at least one
-     * valid nonempty frame mix */
-    av_assert1(nb_visible > 0);
-
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out)
         return AVERROR(ENOMEM);
 
+    if (!ref)
+        goto props_done;
+
     RET(av_frame_copy_props(out, ref));
-    out->pts = pts;
     out->width = outlink->w;
     out->height = outlink->h;
     out->colorspace = outlink->colorspace;
     out->color_range = outlink->color_range;
-    if (s->fps.num)
-        out->duration = 1;
     if (s->deinterlace)
         out->flags &= ~(AV_FRAME_FLAG_INTERLACED | AV_FRAME_FLAG_TOP_FIELD_FIRST);
 
@@ -1000,6 +996,11 @@ static int output_frame(AVFilterContext *ctx, int64_t pts)
         const AVRational stretch = av_div_q(ar_ref, ar_out);
         out->sample_aspect_ratio = av_mul_q(ref->sample_aspect_ratio, stretch);
     }
+
+props_done:
+    out->pts = pts;
+    if (s->fps.num)
+        out->duration = 1;
 
     /* Map, render and unmap output frame */
     if (outdesc->flags & AV_PIX_FMT_FLAG_HWACCEL) {
@@ -1069,6 +1070,9 @@ static int output_frame(AVFilterContext *ctx, int64_t pts)
         target.crop = orig_target.crop = (struct pl_rect2df) {0};
         pl_render_image(s->linear_rr, &target, &orig_target, &opts->params);
         target = orig_target;
+    } else if (!ref) {
+        /* Render an empty image to clear the frame to the desired fill color */
+        pl_render_image(s->linear_rr, NULL, &target, &opts->params);
     }
 
     if (outdesc->flags & AV_PIX_FMT_FLAG_HWACCEL) {
@@ -1162,11 +1166,7 @@ static int handle_input(AVFilterContext *ctx, LibplaceboInput *input)
         pl_queue_push(input->queue, NULL); /* Signal EOF to pl_queue */
         input->status = status;
         input->status_pts = pts;
-        if (!s->status || pts >= s->status_pts) {
-            /* Also propagate to output unless overwritten by later status change */
-            s->status = status;
-            s->status_pts = pts;
-        }
+        s->nb_active--;
     }
 
     return 0;
@@ -1243,6 +1243,10 @@ static int libplacebo_activate(AVFilterContext *ctx)
             }
         }
 
+        /* In constant FPS mode, we can also output an empty frame if there is
+         * a gap in the input timeline and we still have active streams */
+        ok |= s->fps.num && s->nb_active > 0;
+
         if (retry) {
             return 0;
         } else if (ok) {
@@ -1250,8 +1254,18 @@ static int libplacebo_activate(AVFilterContext *ctx)
             for (int i = 0; i < s->nb_inputs; i++)
                 drain_input_pts(&s->inputs[i], out_pts);
             return output_frame(ctx, out_pts);
-        } else if (s->status) {
-            ff_outlink_set_status(outlink, s->status, s->status_pts);
+        } else if (s->nb_active == 0) {
+            /* Forward most recent status */
+            int status = s->inputs[0].status;
+            int64_t status_pts = s->inputs[0].status_pts;
+            for (int i = 1; i < s->nb_inputs; i++) {
+                const LibplaceboInput *in = &s->inputs[i];
+                if (in->status_pts > status_pts) {
+                    status = s->inputs[i].status;
+                    status_pts = s->inputs[i].status_pts;
+                }
+            }
+            ff_outlink_set_status(outlink, status, status_pts);
             return 0;
         }
 
