@@ -47,7 +47,6 @@ extern "C" {
 #include "vsrc_gfxcapture.h"
 }
 
-#include <atomic>
 #include <cinttypes>
 #include <condition_variable>
 #include <cwchar>
@@ -123,8 +122,8 @@ struct GfxCaptureContextWgc {
 
     std::mutex frame_arrived_mutex;
     std::condition_variable frame_arrived_cond;
-    std::atomic<bool> window_closed { false };
-    std::atomic<uint64_t> frame_seq { 0 };
+    bool window_closed { false };
+    uint64_t frame_seq { 0 };
 
     SizeInt32 cap_size { 0, 0 };
     RECT client_area_offsets { 0, 0, 0, 0 };
@@ -196,12 +195,18 @@ static HRESULT get_activation_factory(GfxCaptureContextCpp *ctx, PCWSTR clsid, T
  ****************************************************/
 
 static void wgc_frame_arrived_handler(const std::unique_ptr<GfxCaptureContextWgc> &wgctx) {
-    wgctx->frame_seq.fetch_add(1, std::memory_order_release);
+    {
+        std::lock_guard lock(wgctx->frame_arrived_mutex);
+        wgctx->frame_seq += 1;
+    }
     wgctx->frame_arrived_cond.notify_one();
 }
 
 static void wgc_closed_handler(const std::unique_ptr<GfxCaptureContextWgc> &wgctx) {
-    wgctx->window_closed.store(true, std::memory_order_release);
+    {
+        std::lock_guard lock(wgctx->frame_arrived_mutex);
+        wgctx->window_closed = true;
+    }
     wgctx->frame_arrived_cond.notify_one();
 }
 
@@ -703,13 +708,11 @@ static int run_on_wgc_thread(AVFilterContext *avctx, F &&cb)
     struct CBData {
         std::mutex mutex;
         std::condition_variable cond;
-        std::atomic<bool> done { false };
-        std::atomic<bool> cancel { false };
-        int ret = AVERROR_BUG;
+        bool done { false };
+        bool cancel { false };
+        int ret { AVERROR_BUG };
     };
     auto cbdata = std::make_shared<CBData>();
-
-    std::unique_lock cblock(cbdata->mutex);
 
     boolean res = 0;
     CHECK_HR_RET(wgctx->dispatcher_queue->TryEnqueue(
@@ -717,7 +720,7 @@ static int run_on_wgc_thread(AVFilterContext *avctx, F &&cb)
             [cb = std::forward<F>(cb), cbdata]() {
                 {
                     std::lock_guard lock(cbdata->mutex);
-                    if (cbdata->cancel.load(std::memory_order_acquire))
+                    if (cbdata->cancel)
                         return S_OK;
 
                     try {
@@ -728,7 +731,7 @@ static int run_on_wgc_thread(AVFilterContext *avctx, F &&cb)
                         cbdata->ret = AVERROR_BUG;
                     }
 
-                    cbdata->done.store(true, std::memory_order_release);
+                    cbdata->done = true;
                 }
 
                 cbdata->cond.notify_one();
@@ -739,8 +742,9 @@ static int run_on_wgc_thread(AVFilterContext *avctx, F &&cb)
         return AVERROR_EXTERNAL;
     }
 
-    if (!cbdata->cond.wait_for(cblock, std::chrono::seconds(1), [&]() { return cbdata->done.load(std::memory_order_acquire); })) {
-        cbdata->cancel.store(true, std::memory_order_release);
+    std::unique_lock cblock(cbdata->mutex);
+    if (!cbdata->cond.wait_for(cblock, std::chrono::seconds(1), [&]() { return cbdata->done; })) {
+        cbdata->cancel = true;
         av_log(avctx, AV_LOG_ERROR, "WGC thread callback timed out\n");
         return AVERROR(ETIMEDOUT);
     }
@@ -1455,23 +1459,22 @@ static int gfxcapture_activate(AVFilterContext *avctx)
     if (!ff_outlink_frame_wanted(outlink))
         return FFERROR_NOT_READY;
 
-    std::unique_lock frame_lock(wgctx->frame_arrived_mutex);
-
     for (;;) {
-        uint64_t last_seq = wgctx->frame_seq.load(std::memory_order_acquire);
+        uint64_t last_seq = wgctx->frame_seq;
 
         int ret = process_frame_if_exists(outlink);
         if (ret != AVERROR(EAGAIN))
             return ret;
 
-        if (wgctx->window_closed.load(std::memory_order_acquire)) {
+        std::unique_lock frame_lock(wgctx->frame_arrived_mutex);
+
+        if (wgctx->window_closed && wgctx->frame_seq == last_seq) {
             ff_outlink_set_status(outlink, AVERROR_EOF, ctx->last_pts - ctx->first_pts + 1);
             break;
         }
 
         if (!wgctx->frame_arrived_cond.wait_for(frame_lock, std::chrono::seconds(1), [&]() {
-            return wgctx->frame_seq.load(std::memory_order_acquire) != last_seq ||
-                   wgctx->window_closed.load(std::memory_order_acquire);
+            return wgctx->frame_seq != last_seq || wgctx->window_closed;
         }))
             break;
     }
