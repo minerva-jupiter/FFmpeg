@@ -70,15 +70,11 @@
 #define WHIP_US_PER_MS 1000
 
 /**
- * When sending ICE or DTLS messages, responses are received via UDP. However, the peer
- * may not be ready and return EAGAIN, in which case we should wait for a short duration
- * and retry reading.
- * For instance, if we try to read from UDP and get EAGAIN, we sleep for 5ms and retry.
- * This macro is used to limit the total duration in milliseconds (e.g., 50ms), so we
- * will try at most 5 times.
- * Keep in mind that this macro should have a minimum duration of 5 ms.
+ * If we try to read from UDP and get EAGAIN, we sleep for 5ms and retry up to 10 times.
+ * This will limit the total duration (in milliseconds, 50ms)
  */
-#define ICE_DTLS_READ_INTERVAL 50
+#define ICE_DTLS_READ_MAX_RETRY 10
+#define ICE_DTLS_READ_SLEEP_DURATION 5
 
 /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
 #define STUN_MAGIC_COOKIE 0x2112A442
@@ -205,8 +201,6 @@ enum WHIPState {
     WHIP_STATE_ICE_CONNECTING,
     /* The muxer has received the ICE response from the peer. */
     WHIP_STATE_ICE_CONNECTED,
-    /* The muxer starts attempting the DTLS handshake. */
-    WHIP_STATE_DTLS_CONNECTING,
     /* The muxer has finished the DTLS handshake with the peer. */
     WHIP_STATE_DTLS_FINISHED,
     /* The muxer has finished the SRTP setup. */
@@ -257,6 +251,7 @@ typedef struct WHIPContext {
      */
     char *sdp_offer;
 
+    int is_peer_ice_lite;
     uint64_t ice_tie_breaker; // random 64 bit, for ICE-CONTROLLING
     /* The ICE username and pwd from remote server. */
     char *ice_ufrag_remote;
@@ -886,6 +881,8 @@ static int parse_answer(AVFormatContext *s)
 
     for (i = 0; !avio_feof(pb); i++) {
         ff_get_chomp_line(pb, line, sizeof(line));
+        if (av_strstart(line, "a=ice-lite", &ptr))
+            whip->is_peer_ice_lite = 1;
         if (av_strstart(line, "a=ice-ufrag:", &ptr) && !whip->ice_ufrag_remote) {
             whip->ice_ufrag_remote = av_strdup(ptr);
             if (!whip->ice_ufrag_remote) {
@@ -1294,26 +1291,25 @@ next_packet:
         }
 
         /* Read the STUN or DTLS messages from peer. */
-        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && whip->state < WHIP_STATE_DTLS_CONNECTING; i++) {
+        for (i = 0; i < ICE_DTLS_READ_MAX_RETRY; i++) {
+            if (whip->state > WHIP_STATE_ICE_CONNECTED)
+                break;
             ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
             if (ret > 0)
                 break;
             if (ret == AVERROR(EAGAIN)) {
-                av_usleep(5 * WHIP_US_PER_MS);
+                av_usleep(ICE_DTLS_READ_SLEEP_DURATION * WHIP_US_PER_MS);
                 continue;
             }
             av_log(whip, AV_LOG_ERROR, "Failed to read message\n");
             goto end;
         }
 
-        /* Got nothing, continue to process handshake. */
-        if (ret <= 0 && whip->state < WHIP_STATE_DTLS_CONNECTING)
-            continue;
-
         /* Handle the ICE binding response. */
         if (ice_is_binding_response(whip->buf, ret)) {
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
-                whip->state = WHIP_STATE_ICE_CONNECTED;
+                if (whip->is_peer_ice_lite)
+                    whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime_relative();
                 av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%.2fms\n",
                     whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
@@ -1352,10 +1348,10 @@ next_packet:
         }
 
         /* If got any DTLS messages, handle it. */
-        if (is_dtls_packet(whip->buf, ret) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_DTLS_CONNECTING) {
+        if (is_dtls_packet(whip->buf, ret)) {
             /* Start consent timer when ICE selected */
             whip->whip_last_consent_tx_time = whip->whip_last_consent_rx_time = av_gettime_relative();
-            whip->state = WHIP_STATE_DTLS_CONNECTING;
+            whip->state = WHIP_STATE_ICE_CONNECTED;
             ret = ffurl_handshake(whip->dtls_uc);
             if (ret < 0) {
                 whip->state = WHIP_STATE_FAILED;
