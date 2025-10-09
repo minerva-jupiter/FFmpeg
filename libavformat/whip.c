@@ -325,6 +325,7 @@ typedef struct WHIPContext {
      * Note that pion requires a smaller value, for example, 1200.
      */
     int pkt_size;
+    int buffer_size;/* Underlying protocol send/receive buffer size */
     /**
      * The optional Bearer token for WHIP Authorization.
      * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
@@ -1221,8 +1222,9 @@ static int udp_connect(AVFormatContext *s)
 
     av_dict_set_int(&opts, "connect", 1, 0);
     av_dict_set_int(&opts, "fifo_size", 0, 0);
-    /* Set the max packet size to the buffer size. */
+    /* Pass through the pkt_size and buffer_size to underling protocol */
     av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
+    av_dict_set_int(&opts, "buffer_size", whip->buffer_size, 0);
 
     ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
@@ -1943,8 +1945,10 @@ write_packet:
         if (ret == AVERROR(EINVAL)) {
             av_log(whip, AV_LOG_WARNING, "Ignore failed to write packet=%dB, ret=%d\n", pkt->size, ret);
             ret = 0;
+        } else if (ret == AVERROR(EAGAIN)) {
+            av_log(whip, AV_LOG_ERROR, "UDP send blocked, please increase the buffer via -buffer_size\n");
         } else
-            av_log(whip, AV_LOG_ERROR, "Failed to write packet, size=%d\n", pkt->size);
+            av_log(whip, AV_LOG_ERROR, "Failed to write packet, size=%d, ret=%d\n", pkt->size, ret);
         goto end;
     }
 
@@ -2023,6 +2027,7 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
 static const AVOption options[] = {
     { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, ENC },
     { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
+    { "buffer_size",        "The buffer size, in bytes, of underlying protocol",        OFFSET(buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
