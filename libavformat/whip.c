@@ -67,6 +67,8 @@
  */
 #define DTLS_SRTP_CHECKSUM_LEN 16
 
+#define WHIP_US_PER_MS 1000
+
 /**
  * When sending ICE or DTLS messages, responses are received via UDP. However, the peer
  * may not be ready and return EAGAIN, in which case we should wait for a short duration
@@ -158,6 +160,17 @@
  */
 #define WHIP_SDP_SESSION_ID "4489045141692799359"
 #define WHIP_SDP_CREATOR_IP "127.0.0.1"
+
+/**
+ * Refer to RFC 7675 5.1,
+ *
+ * To prevent expiry of consent, a STUN binding request can be sent periodically.
+ * Implementations SHOULD set a default interval of 5 seconds(5000ms).
+ *
+ * Consent expires after 30 seconds(30000ms).
+ */
+#define WHIP_ICE_CONSENT_CHECK_INTERVAL 5000
+#define WHIP_ICE_CONSENT_EXPIRED_TIMER 30000
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((float)(endtime - starttime) / 1000)
@@ -271,6 +284,8 @@ typedef struct WHIPContext {
     int64_t whip_ice_time;
     int64_t whip_dtls_time;
     int64_t whip_srtp_time;
+    int64_t whip_last_consent_tx_time;
+    int64_t whip_last_consent_rx_time;
 
     /* The certificate and private key content used for DTLS handshake */
     char cert_buf[MAX_CERTIFICATE_SIZE];
@@ -1269,7 +1284,7 @@ next_packet:
             break;
 
         now = av_gettime_relative();
-        if (now - starttime >= whip->handshake_timeout * 1000) {
+        if (now - starttime >= whip->handshake_timeout * WHIP_US_PER_MS) {
             av_log(whip, AV_LOG_ERROR, "DTLS handshake timeout=%dms, cost=%.2fms, elapsed=%.2fms, state=%d\n",
                 whip->handshake_timeout, ELAPSED(starttime, now), ELAPSED(whip->whip_starttime, now), whip->state);
             ret = AVERROR(ETIMEDOUT);
@@ -1282,7 +1297,7 @@ next_packet:
             if (ret > 0)
                 break;
             if (ret == AVERROR(EAGAIN)) {
-                av_usleep(5 * 1000);
+                av_usleep(5 * WHIP_US_PER_MS);
                 continue;
             }
             av_log(whip, AV_LOG_ERROR, "Failed to read message\n");
@@ -1336,6 +1351,8 @@ next_packet:
 
         /* If got any DTLS messages, handle it. */
         if (is_dtls_packet(whip->buf, ret) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_DTLS_CONNECTING) {
+            /* Start consent timer when ICE selected */
+            whip->whip_last_consent_tx_time = whip->whip_last_consent_rx_time = av_gettime_relative();
             whip->state = WHIP_STATE_DTLS_CONNECTING;
             ret = ffurl_handshake(whip->dtls_uc);
             if (ret < 0) {
@@ -1846,8 +1863,26 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     WHIPContext *whip = s->priv_data;
     AVStream *st = s->streams[pkt->stream_index];
     AVFormatContext *rtp_ctx = st->priv_data;
-
-    /* TODO: Send binding request every 1s as WebRTC heartbeat. */
+    int64_t now = av_gettime_relative();
+    /**
+     * Refer to RFC 7675
+     * Periodically send Consent Freshness STUN Binding Request
+     */
+    if (now - whip->whip_last_consent_tx_time > WHIP_ICE_CONSENT_CHECK_INTERVAL * WHIP_US_PER_MS) {
+        int size;
+        ret = ice_create_request(s, whip->buf, sizeof(whip->buf), &size);
+        if (ret < 0) {
+            av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
+            goto end;
+        }
+        ret = ffurl_write(whip->udp, whip->buf, size);
+        if (ret < 0) {
+            av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
+            goto end;
+        }
+        whip->whip_last_consent_tx_time = now;
+        av_log(whip, AV_LOG_DEBUG, "Consent Freshness check sent\n");
+    }
 
     /**
      * Receive packets from the server such as ICE binding requests, DTLS messages,
@@ -1863,6 +1898,10 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     if (!ret) {
         av_log(whip, AV_LOG_ERROR, "Receive EOF from UDP socket\n");
         goto end;
+    }
+    if (ice_is_binding_response(whip->buf, ret)) {
+        whip->whip_last_consent_rx_time = av_gettime_relative();
+        av_log(whip, AV_LOG_DEBUG, "Consent Freshness check received\n");
     }
     if (is_dtls_packet(whip->buf, ret)) {
         if ((ret = ffurl_write(whip->dtls_uc, whip->buf, ret)) < 0) {
@@ -1884,6 +1923,14 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
             handle_nack_rtx(s, ret);
     }
 write_packet:
+    now = av_gettime_relative();
+    if (now - whip->whip_last_consent_rx_time > WHIP_ICE_CONSENT_EXPIRED_TIMER * WHIP_US_PER_MS) {
+        av_log(whip, AV_LOG_ERROR,
+            "Consent Freshness expired after %.2fms (limited %dms), terminate session\n",
+            ELAPSED(now, whip->whip_last_consent_rx_time), WHIP_ICE_CONSENT_EXPIRED_TIMER);
+        ret = AVERROR(ETIMEDOUT);
+        goto end;
+    }
     if (whip->h264_annexb_insert_sps_pps && st->codecpar->codec_id == AV_CODEC_ID_H264) {
         if ((ret = h264_annexb_insert_sps_pps(s, pkt)) < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to insert SPS/PPS before IDR\n");
