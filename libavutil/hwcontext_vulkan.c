@@ -4440,7 +4440,6 @@ static int vulkan_transfer_host(AVHWFramesContext *hwfc, AVFrame *hwf,
         };
         VkCopyMemoryToImageInfoEXT copy_info = {
             .sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT,
-            .flags = VK_HOST_IMAGE_COPY_MEMCPY_EXT,
             .regionCount = 1,
             .pRegions = &region_info,
         };
@@ -4459,14 +4458,13 @@ static int vulkan_transfer_host(AVHWFramesContext *hwfc, AVFrame *hwf,
         }
     } else {
         VkImageToMemoryCopyEXT region_info = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT,
+            .sType = VK_STRUCTURE_TYPE_IMAGE_TO_MEMORY_COPY_EXT,
             .imageSubresource = {
                 .layerCount = 1,
             },
         };
         VkCopyImageToMemoryInfoEXT copy_info = {
             .sType = VK_STRUCTURE_TYPE_COPY_IMAGE_TO_MEMORY_INFO_EXT,
-            .flags = VK_HOST_IMAGE_COPY_MEMCPY_EXT,
             .regionCount = 1,
             .pRegions = &region_info,
         };
@@ -4476,6 +4474,7 @@ static int vulkan_transfer_host(AVHWFramesContext *hwfc, AVFrame *hwf,
             get_plane_wh(&p_w, &p_h, swf->format, swf->width, swf->height, i);
 
             region_info.pHostPointer = swf->data[i];
+            region_info.memoryRowLength = swf->linesize[i];
             region_info.imageSubresource.aspectMask = ff_vk_aspect_flag(hwf, i);
             region_info.imageExtent = (VkExtent3D){ p_w, p_h, 1 };
             copy_info.srcImage = hwf_vk->img[img_idx];
