@@ -25,6 +25,7 @@
 
 #include <SvtJpegxsEnc.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/cpu.h"
 #include "libavutil/imgutils.h"
@@ -54,31 +55,29 @@ static int svt_jpegxs_enc_encode(AVCodecContext* avctx, AVPacket* pkt,
 {
     SvtJpegXsEncodeContext* svt_enc = avctx->priv_data;
 
-    svt_jpeg_xs_bitstream_buffer_t out_buf;
-    svt_jpeg_xs_image_buffer_t in_buf;
     svt_jpeg_xs_frame_t enc_input;
+    svt_jpeg_xs_bitstream_buffer_t *const out_buf = &enc_input.bitstream;
+    svt_jpeg_xs_image_buffer_t *const in_buf = &enc_input.image;
     svt_jpeg_xs_frame_t enc_output;
 
     SvtJxsErrorType_t err = SvtJxsErrorNone;
-    uint32_t pixel_size = svt_enc->encoder.input_bit_depth <= 8 ? 1 : 2;
 
     int ret = ff_get_encode_buffer(avctx, pkt, svt_enc->bitstream_frame_size, 0);
     if (ret < 0)
         return ret;
 
-    out_buf.buffer = pkt->data;// output bitstream ptr
-    out_buf.allocation_size = pkt->size;// output bitstream size
-    out_buf.used_size = 0;
+    out_buf->buffer = pkt->data;// output bitstream ptr
+    out_buf->allocation_size = pkt->size;// output bitstream size
+    out_buf->used_size = 0;
 
+    unsigned pixel_shift = svt_enc->encoder.input_bit_depth <= 8 ? 0 : 1;
     for (int comp = 0; comp < 3; comp++) {
         // svt-jpegxs require stride in pixel's not in bytes, this means that for 10 bit-depth, stride is half the linesize
-        in_buf.stride[comp] = frame->linesize[comp] / pixel_size;
-        in_buf.data_yuv[comp] = frame->data[comp];
-        in_buf.alloc_size[comp] = in_buf.stride[comp] * svt_enc->encoder.source_height * pixel_size;
+        in_buf->stride[comp]     = frame->linesize[comp] >> pixel_shift;
+        in_buf->data_yuv[comp]   = frame->data[comp];
+        in_buf->alloc_size[comp] = frame->linesize[comp] * svt_enc->encoder.source_height;
     }
 
-    enc_input.bitstream = out_buf;
-    enc_input.image = in_buf;
     enc_input.user_prv_ctx_ptr = pkt;
 
     err = svt_jpeg_xs_encoder_send_picture(&svt_enc->encoder, &enc_input, 1 /*blocking*/);
@@ -113,62 +112,61 @@ static av_cold int svt_jpegxs_enc_free(AVCodecContext* avctx) {
     return 0;
 }
 
-static int set_pix_fmt(AVCodecContext* avctx, svt_jpeg_xs_encoder_api_t *encoder)
+static void set_pix_fmt(AVCodecContext *avctx, svt_jpeg_xs_encoder_api_t *encoder)
 {
     switch (avctx->pix_fmt) {
     case AV_PIX_FMT_YUV420P:
         encoder->input_bit_depth = 8;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV420;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV422P:
         encoder->input_bit_depth = 8;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV422;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV444P:
         encoder->input_bit_depth = 8;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV444_OR_RGB;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV420P10LE:
         encoder->input_bit_depth = 10;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV420;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV422P10LE:
         encoder->input_bit_depth = 10;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV422;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV444P10LE:
         encoder->input_bit_depth = 10;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV444_OR_RGB;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV420P12LE:
         encoder->input_bit_depth = 12;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV420;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV422P12LE:
         encoder->input_bit_depth = 12;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV422;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV444P12LE:
         encoder->input_bit_depth = 12;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV444_OR_RGB;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV420P14LE:
         encoder->input_bit_depth = 14;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV420;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV422P14LE:
         encoder->input_bit_depth = 14;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV422;
-        return 0;
+        return;
     case AV_PIX_FMT_YUV444P14LE:
         encoder->input_bit_depth = 14;
         encoder->colour_format = COLOUR_FORMAT_PLANAR_YUV444_OR_RGB;
-        return 0;
+        return;
     default:
+        av_unreachable("Already checked via CODEC_PIXFMTS_ARRAY");
         break;
     }
-    av_log(avctx, AV_LOG_ERROR, "Unsupported pixel format.\n");
-    return AVERROR_INVALIDDATA;
 }
 
 static av_cold int svt_jpegxs_enc_init(AVCodecContext* avctx) {
@@ -187,14 +185,12 @@ static av_cold int svt_jpegxs_enc_init(AVCodecContext* avctx) {
 
     set_pix_fmt(avctx, &svt_enc->encoder);
 
-    svt_enc->encoder.threads_num = FFMIN(avctx->thread_count ? avctx->thread_count : av_cpu_count(), 64);
+    int thread_count = avctx->thread_count ? avctx->thread_count : av_cpu_count();
+    svt_enc->encoder.threads_num = FFMIN(thread_count, 64);
 
-    if (av_log_get_level() < AV_LOG_DEBUG)
-        svt_enc->encoder.verbose = VERBOSE_ERRORS;
-    else if (av_log_get_level() == AV_LOG_DEBUG)
-        svt_enc->encoder.verbose = VERBOSE_SYSTEM_INFO;
-    else
-        svt_enc->encoder.verbose = VERBOSE_WARNINGS;
+    int log_level = av_log_get_level();
+    svt_enc->encoder.verbose = log_level < AV_LOG_DEBUG ? VERBOSE_ERRORS :
+                                  log_level == AV_LOG_DEBUG ? VERBOSE_SYSTEM_INFO : VERBOSE_WARNINGS;
 
     if (avctx->bit_rate <= 0) {
         av_log(avctx, AV_LOG_ERROR, "bitrate can't be 0\n");
