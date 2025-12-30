@@ -217,7 +217,7 @@ int ff_vk_decode_prepare_frame(FFVulkanDecodeContext *dec, AVFrame *pic,
         err = ff_vk_create_view(&ctx->s, &ctx->common,
                                 &vkpic->view.ref[0], &vkpic->view.aspect_ref[0],
                                 (AVVkFrame *)vkpic->dpb_frame->data[0],
-                                dpb_hwfc->format[0], !is_current);
+                                dpb_hwfc->format[0], VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR);
         if (err < 0)
             return err;
 
@@ -231,7 +231,9 @@ int ff_vk_decode_prepare_frame(FFVulkanDecodeContext *dec, AVFrame *pic,
         err = ff_vk_create_view(&ctx->s, &ctx->common,
                                 &vkpic->view.out[0], &vkpic->view.aspect[0],
                                 (AVVkFrame *)pic->data[0],
-                                hwfc->format[0], !is_current);
+                                hwfc->format[0],
+                                VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                                (!is_current ? VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR : 0));
         if (err < 0)
             return err;
 
@@ -1383,8 +1385,7 @@ int ff_vk_decode_init(AVCodecContext *avctx)
                                                            VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR);
         dpb_hwfc->format[0]    = s->hwfc->format[0];
         dpb_hwfc->tiling       = VK_IMAGE_TILING_OPTIMAL;
-        dpb_hwfc->usage        = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
-                                 VK_IMAGE_USAGE_SAMPLED_BIT; /* Shuts validator up. */
+        dpb_hwfc->usage        = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
 
         if (ctx->common.layered_dpb)
             dpb_hwfc->nb_layers = ctx->caps.maxDpbSlots;
@@ -1404,7 +1405,7 @@ int ff_vk_decode_init(AVCodecContext *avctx)
                                     &ctx->common.layered_view,
                                     &ctx->common.layered_aspect,
                                     (AVVkFrame *)ctx->common.layered_frame->data[0],
-                                    s->hwfc->format[0], 1);
+                                    s->hwfc->format[0], VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR);
             if (err < 0)
                 goto fail;
         }
