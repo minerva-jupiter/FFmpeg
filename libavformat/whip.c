@@ -299,8 +299,6 @@ typedef struct WHIPContext {
      */
     uint8_t dtls_srtp_materials[(DTLS_SRTP_KEY_LEN + DTLS_SRTP_SALT_LEN) * 2];
 
-    char ssl_error_message[256];
-
     /* TODO: Use AVIOContext instead of URLContext */
     URLContext *dtls_uc;
 
@@ -338,11 +336,15 @@ typedef struct WHIPContext {
 /**
  * Whether the packet is a DTLS packet.
  */
-static int is_dtls_packet(uint8_t *b, int size) {
-    uint16_t version = AV_RB16(&b[1]);
-    return size > DTLS_RECORD_LAYER_HEADER_LEN &&
-        b[0] >= DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC &&
-        (version == DTLS_VERSION_10 || version == DTLS_VERSION_12);
+static int is_dtls_packet(uint8_t *b, int size)
+{
+    int ret = 0;
+    if (size > DTLS_RECORD_LAYER_HEADER_LEN) {
+        uint16_t version = AV_RB16(&b[1]);
+        ret = b[0] >= DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC &&
+            (version == DTLS_VERSION_10 || version == DTLS_VERSION_12);
+    }
+    return ret;
 }
 
 
@@ -1619,8 +1621,11 @@ static int create_rtp_muxer(AVFormatContext *s)
         ELAPSED(whip->whip_dtls_time,   whip->whip_srtp_time));
 
 end:
-    if (rtp_ctx)
+    if (rtp_ctx) {
+        if (!rtp_ctx->pb)
+            av_freep(&buffer);
         avio_context_free(&rtp_ctx->pb);
+    }
     avformat_free_context(rtp_ctx);
     av_dict_free(&opts);
     return ret;
@@ -1910,7 +1915,7 @@ write_packet:
     if (now - whip->whip_last_consent_rx_time > WHIP_ICE_CONSENT_EXPIRED_TIMER * WHIP_US_PER_MS) {
         av_log(whip, AV_LOG_ERROR,
             "Consent Freshness expired after %.2fms (limited %dms), terminate session\n",
-            ELAPSED(now, whip->whip_last_consent_rx_time), WHIP_ICE_CONSENT_EXPIRED_TIMER);
+            ELAPSED(whip->whip_last_consent_rx_time, now), WHIP_ICE_CONSENT_EXPIRED_TIMER);
         ret = AVERROR(ETIMEDOUT);
         goto end;
     }
