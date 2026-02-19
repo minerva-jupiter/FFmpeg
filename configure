@@ -3119,7 +3119,7 @@ exr_decoder_select="bswapdsp"
 exr_encoder_deps="zlib"
 ffv1_decoder_select="rangecoder"
 ffv1_encoder_select="rangecoder"
-ffv1_vulkan_encoder_select="vulkan spirv_library"
+ffv1_vulkan_encoder_select="vulkan spirv_compiler"
 ffvhuff_decoder_select="huffyuv_decoder"
 ffvhuff_encoder_select="huffyuv_encoder"
 fic_decoder_select="golomb"
@@ -3354,7 +3354,7 @@ av1_vulkan_hwaccel_deps="vulkan"
 av1_vulkan_hwaccel_select="av1_decoder"
 dpx_vulkan_hwaccel_deps="vulkan spirv_compiler"
 dpx_vulkan_hwaccel_select="dpx_decoder"
-ffv1_vulkan_hwaccel_deps="vulkan spirv_library"
+ffv1_vulkan_hwaccel_deps="vulkan spirv_compiler"
 ffv1_vulkan_hwaccel_select="ffv1_decoder"
 h263_vaapi_hwaccel_deps="vaapi"
 h263_vaapi_hwaccel_select="h263_decoder"
@@ -4278,7 +4278,7 @@ cws2fws_extralibs="zlib_extralibs"
 
 # libraries, in any order
 avcodec_deps="avutil"
-avcodec_suggest="libm stdatomic zlib spirv_library"
+avcodec_suggest="libm stdatomic zlib"
 avdevice_deps="avformat avcodec avutil"
 avdevice_suggest="libm stdatomic"
 avfilter_deps="avutil"
@@ -7727,7 +7727,7 @@ probe_glslc(){
     if test_cmd $glslc_probe -v; then
         # glslang/glslangValidator
         glslc=$glslc_probe
-        glslcflags="-V --target-env spirv1.6"
+        glslcflags="-V --target-env spirv1.6 --glsl-version 460"
         glslc_opt_speed=""
         glslc_opt_size="-Os"
         glslc_opt_none="-Od"
@@ -7736,7 +7736,7 @@ probe_glslc(){
     elif test_cmd $glslc_probe --version; then
         # glslc
         glslc=$glslc_probe
-        glslcflags="--target-env=vulkan1.4 --target-spv=spv1.6"
+        glslcflags="--target-env=vulkan1.4 --target-spv=spv1.6 -std=460"
         glslc_opt_speed="-O"
         glslc_opt_size="-Os"
         glslc_opt_none="-O0"
