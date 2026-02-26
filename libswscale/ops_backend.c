@@ -76,10 +76,11 @@ static int compile(SwsContext *ctx, SwsOpList *ops, SwsCompiledOp *out)
     }
 
     *out = (SwsCompiledOp) {
-        .block_size = SWS_BLOCK_SIZE,
-        .cpu_flags  = chain->cpu_flags,
-        .priv       = chain,
-        .free       = ff_sws_op_chain_free_cb,
+        .slice_align = 1,
+        .block_size  = SWS_BLOCK_SIZE,
+        .cpu_flags   = chain->cpu_flags,
+        .priv        = chain,
+        .free        = ff_sws_op_chain_free_cb,
     };
 
     switch (read_type) {
@@ -96,4 +97,5 @@ static int compile(SwsContext *ctx, SwsOpList *ops, SwsCompiledOp *out)
 const SwsOpBackend backend_c = {
     .name       = "c",
     .compile    = compile,
+    .hw_format  = AV_PIX_FMT_NONE,
 };

@@ -26,6 +26,11 @@
 #include "format.h"
 #include "csputils.h"
 #include "ops_internal.h"
+#include "config_components.h"
+
+#if CONFIG_UNSTABLE
+#include "libavutil/hwcontext.h"
+#endif
 
 #define Q(N) ((AVRational) { N, 1 })
 #define Q0   Q(0)
@@ -306,18 +311,31 @@ int sws_isSupportedEndiannessConversion(enum AVPixelFormat pix_fmt)
  */
 SwsFormat ff_fmt_from_frame(const AVFrame *frame, int field)
 {
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
     const AVColorPrimariesDesc *primaries;
     AVFrameSideData *sd;
 
+    enum AVPixelFormat format = frame->format;
+    enum AVPixelFormat hw_format = AV_PIX_FMT_NONE;
+
+#if CONFIG_UNSTABLE
+    if (frame->hw_frames_ctx) {
+        AVHWFramesContext *hwfc = (AVHWFramesContext *)frame->hw_frames_ctx->data;
+        hw_format = frame->format;
+        format = hwfc->sw_format;
+    }
+#endif
+
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(format);
+
     SwsFormat fmt = {
-        .width  = frame->width,
-        .height = frame->height,
-        .format = frame->format,
-        .range  = frame->color_range,
-        .csp    = frame->colorspace,
-        .loc    = frame->chroma_location,
-        .desc   = desc,
+        .width     = frame->width,
+        .height    = frame->height,
+        .format    = format,
+        .hw_format = hw_format,
+        .range     = frame->color_range,
+        .csp       = frame->colorspace,
+        .loc       = frame->chroma_location,
+        .desc      = desc,
         .color = {
             .prim = frame->color_primaries,
             .trc  = frame->color_trc,
@@ -527,6 +545,17 @@ int sws_test_format(enum AVPixelFormat format, int output)
     return output ? sws_isSupportedOutput(format) : sws_isSupportedInput(format);
 }
 
+int sws_test_hw_format(enum AVPixelFormat format)
+{
+    switch (format) {
+    case AV_PIX_FMT_NONE: return 1;
+#if CONFIG_VULKAN
+    case AV_PIX_FMT_VULKAN: return 1;
+#endif
+    default: return 0;
+    }
+}
+
 int sws_test_colorspace(enum AVColorSpace csp, int output)
 {
     switch (csp) {
@@ -575,6 +604,7 @@ int ff_test_fmt(const SwsFormat *fmt, int output)
            sws_test_colorspace(fmt->csp,        output) &&
            sws_test_primaries (fmt->color.prim, output) &&
            sws_test_transfer  (fmt->color.trc,  output) &&
+           sws_test_hw_format (fmt->hw_format)          &&
            test_range         (fmt->range)              &&
            test_loc           (fmt->loc);
 }
@@ -1229,8 +1259,10 @@ static int fmt_dither(SwsContext *ctx, SwsOpList *ops,
         /* Brute-forced offsets; minimizes quantization error across a 16x16
          * bayer dither pattern for standard RGBA and YUVA pixel formats */
         const int offsets_16x16[4] = {0, 3, 2, 5};
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 4; i++) {
+            av_assert0(offsets_16x16[i] <= INT8_MAX);
             dither.y_offset[i] = offsets_16x16[i];
+        }
 
         if (src.desc->nb_components < 3 && bpc >= 8) {
             /**

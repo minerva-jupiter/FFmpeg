@@ -462,6 +462,9 @@ static int add_legacy_sws_pass(SwsGraph *graph, SwsFormat src, SwsFormat dst,
 {
     int ret, warned = 0;
     SwsContext *const ctx = graph->ctx;
+    if (src.hw_format != AV_PIX_FMT_NONE || dst.hw_format != AV_PIX_FMT_NONE)
+        return AVERROR(ENOTSUP);
+
     SwsContext *sws = sws_alloc_context();
     if (!sws)
         return AVERROR(ENOMEM);
@@ -658,6 +661,9 @@ static int adapt_colors(SwsGraph *graph, SwsFormat src, SwsFormat dst,
     if (ff_sws_color_map_noop(&map))
         return 0;
 
+    if (src.hw_format != AV_PIX_FMT_NONE || dst.hw_format != AV_PIX_FMT_NONE)
+        return AVERROR(ENOTSUP);
+
     lut = ff_sws_lut3d_alloc();
     if (!lut)
         return AVERROR(ENOMEM);
@@ -842,6 +848,7 @@ static SwsImg pass_output(const SwsPass *pass, const SwsImg *fallback)
         return *fallback;
 
     SwsImg img = pass->output->img;
+    img.frame_ptr = fallback->frame_ptr;
     for (int i = 0; i < FF_ARRAY_ELEMS(img.data); i++) {
         if (!img.data[i]) {
             img.data[i]     = fallback->data[i];
@@ -854,8 +861,10 @@ static SwsImg pass_output(const SwsPass *pass, const SwsImg *fallback)
 
 void ff_sws_graph_run(SwsGraph *graph, const SwsImg *output, const SwsImg *input)
 {
-    av_assert0(output->fmt == graph->dst.format);
-    av_assert0(input->fmt  == graph->src.format);
+    av_assert0(output->fmt == graph->dst.hw_format ||
+               output->fmt == graph->dst.format);
+    av_assert0(input->fmt  == graph->src.hw_format ||
+               input->fmt  == graph->src.format);
 
     for (int i = 0; i < graph->num_passes; i++) {
         const SwsPass *pass = graph->passes[i];
