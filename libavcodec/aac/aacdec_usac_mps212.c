@@ -544,7 +544,7 @@ static void coarse_to_fine(int16_t *data, enum AACMPSDataType data_type,
                            int start_band, int end_band)
 {
     for (int i = start_band; i < end_band; i++)
-        data[i] <<= 1;
+        data[i] *= 2;
     if (data_type == MPS_CLD) {
         for (int i = start_band; i < end_band; i++) {
             if (data[i] == -14)
@@ -583,6 +583,9 @@ static int get_freq_strides(int16_t *freq_strides, int band_stride,
             freq_strides[i]--;
         }
     }
+
+    for (int i = 0; i <= data_bands; i++)
+        freq_strides[i] = av_clip_uintp2(freq_strides[i], 2);
 
     return data_bands;
 }
