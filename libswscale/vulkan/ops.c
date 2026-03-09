@@ -92,16 +92,16 @@ typedef struct VulkanPriv {
     enum FFVkShaderRepFormat dst_rep;
 } VulkanPriv;
 
-static void process(const SwsOpExec *exec, const void *priv,
-                    int x_start, int y_start, int x_end, int y_end)
+static void process(const SwsFrame *dst, const SwsFrame *src, int y, int h,
+                    const SwsPass *pass)
 {
-    VulkanPriv *p = (VulkanPriv *)priv;
+    VulkanPriv *p = (VulkanPriv *) pass->priv;
     FFVkExecContext *ec = ff_vk_exec_get(&p->s->vkctx, &p->s->e);
     FFVulkanFunctions *vk = &p->s->vkctx.vkfn;
     ff_vk_exec_start(&p->s->vkctx, ec);
 
-    AVFrame *src_f = (AVFrame *) exec->in_frame->avframe;
-    AVFrame *dst_f = (AVFrame *) exec->out_frame->avframe;
+    AVFrame *src_f = (AVFrame *) src->avframe;
+    AVFrame *dst_f = (AVFrame *) dst->avframe;
     ff_vk_exec_add_dep_frame(&p->s->vkctx, ec, src_f,
                              VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
@@ -157,6 +157,7 @@ static void free_fn(void *priv)
     av_free(priv);
 }
 
+#if CONFIG_LIBSHADERC || CONFIG_LIBGLSLANG
 static void add_desc_read_write(FFVulkanDescriptorSetBinding *out_desc,
                                 enum FFVkShaderRepFormat *out_rep,
                                 const SwsOp *op)
@@ -179,7 +180,6 @@ static void add_desc_read_write(FFVulkanDescriptorSetBinding *out_desc,
     *out_rep = op->type == SWS_PIXEL_F32 ? FF_VK_REP_FLOAT : FF_VK_REP_UINT;
 }
 
-#if CONFIG_LIBSHADERC || CONFIG_LIBGLSLANG
 static int add_ops_glsl(VulkanPriv *p, FFVulkanOpsCtx *s,
                         SwsOpList *ops, FFVulkanShader *shd)
 {
@@ -328,9 +328,8 @@ static int compile(SwsContext *sws, SwsOpList *ops, SwsCompiledOp *out)
         return err;
 
     *out = (SwsCompiledOp) {
-        .slice_align = 0,
-        .block_size  = 1,
-        .func        = process,
+        .opaque      = true,
+        .func_opaque = process,
         .priv        = av_memdup(&p, sizeof(p)),
         .free        = free_fn,
     };
