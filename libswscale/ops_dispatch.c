@@ -85,6 +85,8 @@ int ff_sws_ops_compile(SwsContext *ctx, const SwsOpList *ops, SwsCompiledOp *out
                "block size = %d, over-read = %d, over-write = %d, cpu flags = 0x%x\n",
                backend->name, out->block_size, out->over_read, out->over_write,
                out->cpu_flags);
+
+        ff_sws_op_list_print(ctx, AV_LOG_VERBOSE, AV_LOG_TRACE, ops);
         return 0;
     }
 
@@ -387,8 +389,6 @@ int ff_sws_compile_pass(SwsGraph *graph, SwsOpList *ops, int flags,
         ret = ff_sws_op_list_optimize(ops);
         if (ret < 0)
             return ret;
-    } else {
-        ff_sws_op_list_update_comps(ops);
     }
 
     return compile(graph, ops, dst, input, output);

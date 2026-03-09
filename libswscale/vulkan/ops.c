@@ -157,6 +157,28 @@ static void free_fn(void *priv)
     av_free(priv);
 }
 
+static void add_desc_read_write(FFVulkanDescriptorSetBinding *out_desc,
+                                enum FFVkShaderRepFormat *out_rep,
+                                const SwsOp *op)
+{
+    const char *img_type = op->type == SWS_PIXEL_F32 ? "rgba32f"  :
+                           op->type == SWS_PIXEL_U32 ? "rgba32ui" :
+                           op->type == SWS_PIXEL_U16 ? "rgba16ui" :
+                                                       "rgba8ui";
+
+    *out_desc = (FFVulkanDescriptorSetBinding) {
+        .name = op->op == SWS_OP_WRITE ? "dst_img" : "src_img",
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .mem_layout = img_type,
+        .mem_quali = op->op == SWS_OP_WRITE ? "writeonly" : "readonly",
+        .dimensions = 2,
+        .elems = op->rw.packed ? 1 : op->rw.elems,
+        .stages = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    *out_rep = op->type == SWS_PIXEL_F32 ? FF_VK_REP_FLOAT : FF_VK_REP_UINT;
+}
+
 #if CONFIG_LIBSHADERC || CONFIG_LIBGLSLANG
 static int add_ops_glsl(VulkanPriv *p, FFVulkanOpsCtx *s,
                         SwsOpList *ops, FFVulkanShader *shd)
@@ -179,37 +201,11 @@ static int add_ops_glsl(VulkanPriv *p, FFVulkanOpsCtx *s,
     int nb_desc = 0;
     FFVulkanDescriptorSetBinding buf_desc[8];
 
-    for (int n = 0; n < ops->num_ops; n++) {
-        const SwsOp *op = &ops->ops[n];
-        /* Set initial type */
-        if (op->op == SWS_OP_READ || op->op == SWS_OP_WRITE ||
-            op->op == SWS_OP_CLEAR) {
-            if (op->rw.frac)
-                return AVERROR(ENOTSUP);
-        }
-        if (op->op == SWS_OP_READ || op->op == SWS_OP_WRITE) {
-            const char *img_type = op->type == SWS_PIXEL_F32 ? "rgba32f"  :
-                                   op->type == SWS_PIXEL_U32 ? "rgba32ui" :
-                                   op->type == SWS_PIXEL_U16 ? "rgba16ui" :
-                                                               "rgba8ui";
-            buf_desc[nb_desc++] = (FFVulkanDescriptorSetBinding) {
-                .name = op->op == SWS_OP_WRITE ? "dst_img" : "src_img",
-                .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                .mem_layout = img_type,
-                .mem_quali = op->op == SWS_OP_WRITE ? "writeonly" : "readonly",
-                .dimensions = 2,
-                .elems = (op->rw.packed ? 1 : op->rw.elems),
-                .stages = VK_SHADER_STAGE_COMPUTE_BIT,
-            };
-            if (op->op == SWS_OP_READ)
-                p->src_rep = op->type == SWS_PIXEL_F32 ? FF_VK_REP_FLOAT :
-                             FF_VK_REP_UINT;
-            else
-                p->dst_rep = op->type == SWS_PIXEL_F32 ? FF_VK_REP_FLOAT :
-                             FF_VK_REP_UINT;
-        }
-    }
-
+    const SwsOp *read  = ff_sws_op_list_input(ops);
+    const SwsOp *write = ff_sws_op_list_output(ops);
+    if (read)
+        add_desc_read_write(&buf_desc[nb_desc++], &p->src_rep, read);
+    add_desc_read_write(&buf_desc[nb_desc++], &p->dst_rep, write);
     ff_vk_shader_add_descriptor_set(&s->vkctx, shd, buf_desc, nb_desc, 0, 0);
 
     GLSLC(0, void main()                                                      );
@@ -234,9 +230,13 @@ static int add_ops_glsl(VulkanPriv *p, FFVulkanOpsCtx *s,
         const char *type_s = op->type == SWS_PIXEL_F32 ? "float" :
                              op->type == SWS_PIXEL_U32 ? "uint32_t" :
                              op->type == SWS_PIXEL_U16 ? "uint16_t" : "uint8_t";
+        av_bprintf(&shd->src, "    // %s\n", ff_sws_op_type_name(op->op));
+
         switch (op->op) {
         case SWS_OP_READ: {
-            if (op->rw.packed) {
+            if (op->rw.frac) {
+                return AVERROR(ENOTSUP);
+            } else if (op->rw.packed) {
                 GLSLF(1, %s = %s(imageLoad(src_img[0], pos));                  ,
                       type_name, type_v);
             } else {
@@ -247,7 +247,9 @@ static int add_ops_glsl(VulkanPriv *p, FFVulkanOpsCtx *s,
             break;
         }
         case SWS_OP_WRITE: {
-            if (op->rw.packed) {
+            if (op->rw.frac) {
+                return AVERROR(ENOTSUP);
+            } else if (op->rw.packed) {
                 GLSLF(1, imageStore(dst_img[0], pos, %s(%s));                  ,
                       type_v, type_name);
             } else {
