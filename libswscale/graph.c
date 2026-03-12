@@ -502,6 +502,8 @@ static int add_legacy_sws_pass(SwsGraph *graph, const SwsFormat *src,
     sws->dither      = ctx->dither;
     sws->alpha_blend = ctx->alpha_blend;
     sws->gamma_flag  = ctx->gamma_flag;
+    sws->scaler      = ctx->scaler;
+    sws->scaler_sub  = ctx->scaler_sub;
 
     sws->src_w       = src->width;
     sws->src_h       = src->height;
@@ -524,8 +526,8 @@ static int add_legacy_sws_pass(SwsGraph *graph, const SwsFormat *src,
     legacy_chr_pos(graph, &sws->dst_h_chr_pos, ctx->dst_h_chr_pos, &warned);
     legacy_chr_pos(graph, &sws->dst_v_chr_pos, ctx->dst_v_chr_pos, &warned);
 
-    sws->scaler_params[0] = ctx->scaler_params[0];
-    sws->scaler_params[1] = ctx->scaler_params[1];
+    for (int i = 0; i < SWS_NUM_SCALER_PARAMS; i++)
+        sws->scaler_params[i] = ctx->scaler_params[i];
 
     ret = sws_init_context(sws, NULL, NULL);
     if (ret < 0) {
@@ -830,6 +832,8 @@ static int opts_equal(const SwsContext *c1, const SwsContext *c2)
            c1->dst_h_chr_pos == c2->dst_h_chr_pos &&
            c1->dst_v_chr_pos == c2->dst_v_chr_pos &&
            c1->intent        == c2->intent        &&
+           c1->scaler        == c2->scaler        &&
+           c1->scaler_sub    == c2->scaler_sub    &&
            !memcmp(c1->scaler_params, c2->scaler_params, sizeof(c1->scaler_params));
 
 }
