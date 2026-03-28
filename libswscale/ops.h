@@ -28,6 +28,7 @@
 #include "libavutil/bprint.h"
 
 #include "graph.h"
+#include "filters.h"
 
 typedef enum SwsPixelType {
     SWS_PIXEL_NONE = 0,
@@ -68,6 +69,10 @@ typedef enum SwsOpType {
     SWS_OP_LINEAR,          /* generalized linear affine transform */
     SWS_OP_DITHER,          /* add dithering noise */
 
+    /* Filtering operations. Always output floating point. */
+    SWS_OP_FILTER_H,        /* horizontal filtering */
+    SWS_OP_FILTER_V,        /* vertical filtering */
+
     SWS_OP_TYPE_NB,
 } SwsOpType;
 
@@ -100,17 +105,27 @@ typedef struct SwsComps {
 } SwsComps;
 
 typedef struct SwsReadWriteOp {
+    /**
+     * Examples:
+     *   rgba      = 4x u8 packed
+     *   yuv444p   = 3x u8
+     *   rgb565    = 1x u16   <- use SWS_OP_UNPACK to unpack
+     *   monow     = 1x u8 (frac 3)
+     *   rgb4      = 1x u8 (frac 1)
+     */
     uint8_t elems; /* number of elements (of type `op.type`) to read/write */
     uint8_t frac;  /* fractional pixel step factor (log2) */
     bool packed;   /* read multiple elements from a single plane */
 
-    /** Examples:
-     *    rgba      = 4x u8 packed
-     *    yuv444p   = 3x u8
-     *    rgb565    = 1x u16   <- use SWS_OP_UNPACK to unpack
-     *    monow     = 1x u8 (frac 3)
-     *    rgb4      = 1x u8 (frac 1)
+    /**
+     * Filter kernel to apply to each plane while sampling. Currently, only
+     * one shared filter kernel is supported for all planes. (Optional)
+     *
+     * Note: As with SWS_OP_FILTER_*, if a filter kernel is in use, the read
+     * operation will always output floating point values.
      */
+    SwsOpType filter;         /* some value of SWS_OP_FILTER_* */
+    SwsFilterWeights *kernel; /* (refstruct) */
 } SwsReadWriteOp;
 
 typedef struct SwsPackOp {
@@ -187,6 +202,10 @@ enum {
 /* Helper function to compute the correct mask */
 uint32_t ff_sws_linear_mask(SwsLinearOp);
 
+typedef struct SwsFilterOp {
+    SwsFilterWeights *kernel; /* filter kernel (refstruct) */
+} SwsFilterOp;
+
 typedef struct SwsOp {
     SwsOpType op;      /* operation to perform */
     SwsPixelType type; /* pixel type to operate on */
@@ -197,6 +216,7 @@ typedef struct SwsOp {
         SwsSwizzleOp    swizzle;
         SwsConvertOp    convert;
         SwsDitherOp     dither;
+        SwsFilterOp     filter;
         SwsConst        c;
     };
 
