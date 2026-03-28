@@ -692,6 +692,14 @@ static int decode_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame,
         if (frame->private_ref) {
             FrameDecodeData *fdd = frame->private_ref;
 
+            if (fdd->hwaccel_priv_post_process) {
+                ret = fdd->hwaccel_priv_post_process(avctx, frame);
+                if (ret < 0) {
+                    av_frame_unref(frame);
+                    return ret;
+                }
+            }
+
             if (fdd->post_process) {
                 ret = fdd->post_process(avctx, frame);
                 if (ret < 0) {
@@ -1703,7 +1711,7 @@ static int attach_post_process_data(AVCodecContext *avctx, AVFrame *frame)
         FFLCEVCFrame *frame_ctx;
         int ret;
 
-        if (!dc->lcevc.width || !dc->lcevc.height) {
+        if (fdd->post_process || !dc->lcevc.width || !dc->lcevc.height) {
             dc->lcevc.frame = 0;
             return 0;
         }
