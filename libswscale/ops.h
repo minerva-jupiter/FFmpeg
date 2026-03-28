@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdalign.h>
 
+#include "libavutil/bprint.h"
+
 #include "graph.h"
 
 typedef enum SwsPixelType {
@@ -209,6 +211,11 @@ typedef struct SwsOp {
 } SwsOp;
 
 /**
+ * Describe an operation in human-readable form.
+ */
+void ff_sws_op_desc(AVBPrint *bp, const SwsOp *op, const bool unused[4]);
+
+/**
  * Frees any allocations associated with an SwsOp and sets it to {0}.
  */
 void ff_sws_op_uninit(SwsOp *op);
@@ -318,5 +325,37 @@ enum SwsOpCompileFlags {
  */
 int ff_sws_compile_pass(SwsGraph *graph, SwsOpList **ops, int flags,
                         SwsPass *input, SwsPass **output);
+
+/**
+ * Helper function to enumerate over all possible (optimized) operation lists,
+ * under the current set of options in `ctx`, and run the given callback on
+ * each list.
+ *
+ * @param src_fmt If set (not AV_PIX_FMT_NONE), constrain the source format
+ * @param dst_fmt If set (not AV_PIX_FMT_NONE), constrain the destination format
+ * @return 0 on success, the return value if cb() < 0, or a negative error code
+ *
+ * @note `ops` belongs to ff_sws_enum_op_lists(), but may be mutated by `cb`.
+ * @see ff_sws_enum_ops()
+ */
+int ff_sws_enum_op_lists(SwsContext *ctx, void *opaque,
+                         enum AVPixelFormat src_fmt, enum AVPixelFormat dst_fmt,
+                         int (*cb)(SwsContext *ctx, void *opaque, SwsOpList *ops));
+
+/**
+ * Helper function to enumerate over all possible operations, under the current
+ * set of options in `ctx`, and run the given callback on each operation.
+ *
+ * @param src_fmt If set (not AV_PIX_FMT_NONE), constrain the source format
+ * @param dst_fmt If set (not AV_PIX_FMT_NONE), constrain the destination format
+ * @return 0 on success, the return value if cb() < 0, or a negative error code
+ *
+ * @note May contain duplicates. `op` belongs to ff_sws_enum_ops(), but may be
+ *       mutated by `cb`.
+ * @see ff_sws_num_op_lists()
+ */
+int ff_sws_enum_ops(SwsContext *ctx, void *opaque,
+                    enum AVPixelFormat src_fmt, enum AVPixelFormat dst_fmt,
+                    int (*cb)(SwsContext *ctx, void *opaque, SwsOp *op));
 
 #endif
